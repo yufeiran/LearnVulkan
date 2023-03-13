@@ -11,6 +11,8 @@
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include<glm/glm.hpp>
 #include<glm/gtc/matrix_transform.hpp>
+#define GLM_ENABLE_EXPERIMENTAL
+#include<glm/gtx/hash.hpp>
 
 #include<chrono>
 
@@ -27,13 +29,20 @@
 #include<algorithm>
 #include<fstream>
 #include<array>
+#include<unordered_map>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include<stb_image.h>
 
+#define TINYOBJLOADER_IMPLEMENTATION
+#include<tiny_obj_loader.h>
 
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
+
+const std::string MODEL_PATH = "../models/viking_room.obj";
+const std::string TEXTURE_PATH = "../textures/viking_room.png";
+
 const int MAX_FRAMES_IN_FLIGHT = 2;
 
 const std::vector<const char*> validationLayers = {
@@ -43,11 +52,16 @@ const std::vector<const char*>deviceExtensions = {
 	VK_KHR_SWAPCHAIN_EXTENSION_NAME
 };
 
+
+
+
 #ifdef NDEBUG
 const bool enableValidationLayers = false;
 #else 
 const bool enableValidationLayers = true;
 #endif
+
+
 
 struct Vertex {
 	glm::vec3 pos;
@@ -82,30 +96,26 @@ struct Vertex {
 
 		return attributeDescriptions;
 	}
+
+	bool operator==(const Vertex& other)const {
+		return (pos == other.pos) && (color == other.color) && texCoord == other.texCoord;
+	}
 };
+
+namespace std {
+	template<>struct hash<Vertex> {
+		size_t operator()(Vertex const& vertex)const{
+			return ((hash<glm::vec3>()(vertex.pos) ^
+				(hash<glm::vec3>()(vertex.color) << 1)) >> 1) ^
+				(hash<glm::vec2>()(vertex.texCoord) << 1);
+		}
+	};
+}
 
 struct UniformBufferObject {
 	glm::mat4 model;
 	glm::mat4 view;
 	glm::mat4 proj;
-};
-
-const std::vector<Vertex> vertices = {
-	{{-0.5f,-0.5f,0.0f},{1.0f,0.0f,0.0f},{1.0f,0.0f}},
-	{{0.5f,-0.5f,0.0f},{0.0f,1.0f,0.0f},{0.0f,0.0f}},
-	{{0.5f,0.5f,0.0f},{0.0f,0.0f,1.0f},{0.0f,1.0f}},
-	{{-0.5f,0.5f,0.0f},{1.0f,1.0f,1.0f},{1.0f,1.0f}},
-
-	{{-0.5f,-0.5f,-0.5f},{1.0f,0.0f,0.0f},{1.0f,0.0f}},
-	{{0.5f,-0.5f,-0.5f},{0.0f,1.0f,0.0f},{0.0f,0.0f}},
-	{{0.5f,0.5f,-0.5f},{0.0f,0.0f,1.0f},{0.0f,1.0f}},
-	{{-0.5f,0.5f,-0.5f},{1.0f,1.0f,1.0f},{1.0f,1.0f}}
-};
-
-
-const std::vector<uint16_t> indices = {
-	0,1,2,2,3,0,
-	4,5,6,6,7,4
 };
 
 VkResult CreateDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
@@ -186,10 +196,16 @@ private:
 	std::vector<VkFence> inFlightFences;
 	bool framebufferResized = false;
 	uint32_t currentFrame = 0;
+
+	std::vector<Vertex>vertices;
+	std::vector<uint32_t>indices;
 	VkBuffer vertexBuffer;
 	VkDeviceMemory vertexBufferMemory;
 	VkBuffer indexBuffer;
 	VkDeviceMemory indexBufferMemory;
+
+
+
 
 	VkImage textureImage;
 	VkDeviceMemory textureImageMemory;
@@ -234,6 +250,7 @@ private:
 		createTextureImage();
 		createTextureImageView();
 		createTextureSampler();
+		loadModel();
 		createVertexBuffer();
 		createIndexBuffer();
 		createUniformBuffers();
@@ -875,7 +892,8 @@ private:
 		rasterizer.rasterizerDiscardEnable = VK_FALSE;
 		rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
 		rasterizer.lineWidth = 1.0f;
-		rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+		//rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;  //±³ÃæÏûÒþ
+		rasterizer.cullMode = VK_CULL_MODE_NONE;
 		rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 		rasterizer.depthBiasEnable = VK_FALSE;
 		rasterizer.depthBiasConstantFactor = 0.0f; // Optional
@@ -1142,7 +1160,7 @@ private:
 		VkDeviceSize  offsets[] = { 0 };
 		vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-		vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+		vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
 
 
@@ -1543,7 +1561,7 @@ private:
 
 	void createTextureImage() {
 		int texWidth, texHeight, texChannels;
-		stbi_uc* pixels = stbi_load("../textures/texture.jpg", &texWidth, &texHeight,
+		stbi_uc* pixels = stbi_load(TEXTURE_PATH.c_str(), &texWidth, &texHeight,
 			&texChannels, STBI_rgb_alpha);
 		VkDeviceSize imageSize = texWidth * texHeight * 4;
 
@@ -1809,6 +1827,44 @@ private:
 	}
 
 
+	void loadModel() {
+		tinyobj::attrib_t attrib;
+		std::vector<tinyobj::shape_t>shapes;
+		std::vector<tinyobj::material_t>materials;
+		std::string warn, err;
+
+		if (!tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, MODEL_PATH.c_str())) {
+			throw std::runtime_error(warn + err);
+		}
+
+		std::unordered_map<Vertex, uint32_t> uniqueVertices{};
+
+
+		for (const auto& shape : shapes) {
+			for (const auto& index : shape.mesh.indices) {
+				Vertex vertex{};
+
+				vertex.pos = {
+					attrib.vertices[3 * index.vertex_index + 0],
+					attrib.vertices[3 * index.vertex_index + 1],
+					attrib.vertices[3 * index.vertex_index + 2]
+				};
+
+				vertex.texCoord = {
+					attrib.texcoords[2 * index.texcoord_index + 0],
+					1.0f-attrib.texcoords[2 * index.texcoord_index + 1]
+				};
+
+				vertex.color = { 1.0f,1.0f,1.0f };
+
+				if (uniqueVertices.count(vertex) == 0) {
+					uniqueVertices[vertex] = static_cast<uint32_t>(vertices.size());
+					vertices.push_back(vertex);
+				}
+				indices.push_back(uniqueVertices[vertex]);
+			}
+		}
+	}
 };
 
 int main() {
