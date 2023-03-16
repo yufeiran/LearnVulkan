@@ -1,8 +1,3 @@
-//imgui
-#include<imgui.h>
-#include<imgui_impl_glfw.h>
-#include<imgui_impl_vulkan.h>
-
 #include<glad/glad.h>
 
 #define VK_USE_PLATFORM_WIN32_KHR
@@ -42,6 +37,10 @@
 #define TINYOBJLOADER_IMPLEMENTATION
 #include<tiny_obj_loader.h>
 
+#include<imgui.h>
+#include<imgui_impl_glfw.h>
+#include<imgui_impl_vulkan.h>
+	
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
 
@@ -66,19 +65,7 @@ const bool enableValidationLayers = false;
 const bool enableValidationLayers = true;
 #endif
 
-static void glfw_error_callback(int error, const char* description)
-{
-	fprintf(stderr, "GLFW Error %d: %s\n", error, description);
-}
-
-static void check_vk_result(VkResult err)
-{
-	if (err == 0)
-		return;
-	fprintf(stderr, "[vulkan] Error: VkResult = %d\n", err);
-	if (err < 0)
-		abort();
-}
+static ImGui_ImplVulkanH_Window g_MainWindowData;
 
 struct Vertex {
 	glm::vec3 pos;
@@ -171,13 +158,12 @@ struct SwapChainSupportDetails {
 };
 
 
-
 class HelloTriangleApplication {
 public:
 	void run() {
 		initWindow();
 		initVulkan();
-		initImGui();
+		initImgui();
 		mainLoop();
 		cleanup();
 	}
@@ -189,7 +175,6 @@ private:
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 	VkDevice device;
 	VkSurfaceKHR surface;
-	uint32_t queueFamily;
 	VkQueue graphicsQueue;
 	VkQueue presentQueue;
 	VkSwapchainKHR swapChain;
@@ -240,17 +225,14 @@ private:
 	VkDescriptorPool descriptorPool;
 	std::vector<VkDescriptorSet> descriptorSets;
 
+	//for imgui
+	VkDescriptorPool imguiPool;
+	ImGuiIO imguiIO;
 
-	// ImGui
-	ImGuiIO io;
-	ImGui_ImplVulkanH_Window imGuiMainWindowData;
-	int                      g_MinImageCount;
+	float deltaTime = 0.0f;
+	float lastFrame = 0.0f;
 
 	void initWindow() {
-
-
-		glfwSetErrorCallback(glfw_error_callback);
-
 		glfwInit();
 
 		glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -258,10 +240,6 @@ private:
 		window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
 		glfwSetWindowUserPointer(window, this);
 		glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
-
-
-
-		
 
 
 	}
@@ -293,97 +271,116 @@ private:
 		createSyncObjects();
 	}
 
-	void initImGui()
-	{
+	void initImgui() {
 
-		QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+		//1 create descriptor pool for IMGUI
+		VkDescriptorPoolSize pool_size[] =
+		{
+			{VK_DESCRIPTOR_TYPE_SAMPLER,1000},
+			{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1000},
+			{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,1000},
+			{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,1000},
+			{VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,1000},
+			{VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,1000},
+			{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,1000},
+			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1000},
+			{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,1000},
+			{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC,1000},
+			{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,1000}
+		};
 
-
-		ImGui_ImplVulkanH_Window* wd = &imGuiMainWindowData;
-
-
-		// Create SwapChain, RenderPass, Framebuffer, etc.
-		IM_ASSERT(g_MinImageCount >= 2);
-		ImGui_ImplVulkanH_CreateOrResizeWindow(instance, physicalDevice, device, wd, indices.graphicsFamily.value(), nullptr, WIDTH, HEIGHT	, g_MinImageCount);
+		VkDescriptorPoolCreateInfo pool_info = {};
+		pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+		pool_info.maxSets = 1000;
+		pool_info.poolSizeCount = std::size(pool_size);
+		pool_info.pPoolSizes = pool_size;
 
 		
-		//Setup Dear Imgui
-		IMGUI_CHECKVERSION();
+		if (vkCreateDescriptorPool(device, &pool_info, nullptr, &imguiPool) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create imgui descriptor pool!");
+		}
+
+		//2 initialize imgui library
+
+		// initialize for core imgui
 		ImGui::CreateContext();
-		io = ImGui::GetIO(); (void)io;
-		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-		ImGui::StyleColorsDark();
+		imguiIO = ImGui::GetIO(); (void)imguiIO;
+		imguiIO.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+		ImGui::StyleColorsLight();
 
+		// initialize for glfw
+		ImGui_ImplGlfw_InitForVulkan(window,true); // install_callbacks??
 
+		// initialize for vulkan
 		ImGui_ImplVulkan_InitInfo init_info = {};
 		init_info.Instance = instance;
 		init_info.PhysicalDevice = physicalDevice;
 		init_info.Device = device;
-		init_info.QueueFamily = indices.graphicsFamily.value();
 		init_info.Queue = graphicsQueue;
-		init_info.PipelineCache = VK_NULL_HANDLE; //TODO
-		init_info.DescriptorPool = descriptorPool;
-		init_info.Subpass = 0;
-		init_info.MinImageCount = g_MinImageCount;
-		init_info.ImageCount = wd->ImageCount;
+		init_info.DescriptorPool = imguiPool;
+		init_info.MinImageCount = MAX_FRAMES_IN_FLIGHT;
+		init_info.ImageCount = MAX_FRAMES_IN_FLIGHT;
 		init_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
-		init_info.Allocator = nullptr;
-		init_info.CheckVkResultFn = check_vk_result;
-		ImGui_ImplVulkan_Init(&init_info, wd->RenderPass);
-		 
 
-		// Upload Fonts
-		{
-			// Use any command queue
-			
-			VkResult err = vkResetCommandPool(device, commandPool, 0);
-			VkCommandBuffer command_buffer = commandBuffers[0];
-			check_vk_result(err);
-			VkCommandBufferBeginInfo begin_info = {};
-			begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-			begin_info.flags |= VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-			err = vkBeginCommandBuffer(command_buffer, &begin_info);
-			check_vk_result(err);
+		ImGui_ImplVulkan_Init(&init_info, renderPass);
 
-			ImGui_ImplVulkan_CreateFontsTexture(command_buffer);
+	
+		//execute a gpu command to upload imgui font textures
+		VkCommandBuffer commandBuffer = beginSingleTimeCommands();
+		ImGui_ImplVulkan_CreateFontsTexture(commandBuffer);
+		endSingleTimeCommands(commandBuffer);
 
-			VkSubmitInfo end_info = {};
-			end_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-			end_info.commandBufferCount = 1;
-			end_info.pCommandBuffers = &command_buffer;
-			err = vkEndCommandBuffer(command_buffer);
-			check_vk_result(err);
-			err = vkQueueSubmit(graphicsQueue, 1, &end_info, VK_NULL_HANDLE);
-			check_vk_result(err);
+		//clear font textures from cpu data
+		ImGui_ImplVulkan_DestroyFontUploadObjects();
 
-			err = vkDeviceWaitIdle(device);
-			check_vk_result(err);
-			ImGui_ImplVulkan_DestroyFontUploadObjects();
+		int w, h;
+		glfwGetFramebufferSize(window, &w, &h);
+	}
 
 
-		}
 
-
+	void cleanupImGui() {
+		vkDestroyDescriptorPool(device, imguiPool, nullptr);
+		ImGui_ImplVulkan_Shutdown();
 	}
 
 	void mainLoop() {
-		//imgui State
-		bool show_demo_window = true;
-		bool show_another_window = false;
-		ImVec4 clear_color = ImVec4(0.45f, 0.55f, 0.60f, 1.00f);
+
+		float currentFrame = static_cast<float>(glfwGetTime());
+		deltaTime = currentFrame - lastFrame;
+		lastFrame = currentFrame;
+		
+		bool myWindow = true;
+
 
 		while (!glfwWindowShouldClose(window)) {
 			glfwPollEvents();
+			
+
+			ImGui_ImplVulkan_NewFrame();
+			ImGui_ImplGlfw_NewFrame();
+
+			ImGui::NewFrame();
+
+
+			ImGui::ShowDemoWindow();
+
+			{
+				ImGui::Begin("Hello World");
+
+				ImGui::Text("Average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+
+				ImGui::End();
+			}
+
+
 			drawFrame();
+
+
+
 		}
 		vkDeviceWaitIdle(device);
-	}
-
-	void recreateImGuiWindow(int width,int height) {
-		QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
-		ImGui_ImplVulkan_SetMinImageCount(g_MinImageCount);
-		ImGui_ImplVulkanH_CreateOrResizeWindow(instance, physicalDevice, device, &imGuiMainWindowData, indices.graphicsFamily.value(), nullptr, width, height, g_MinImageCount);
-		imGuiMainWindowData.FrameIndex = 0;
 	}
 
 	void recreateSwapChain() {
@@ -398,7 +395,7 @@ private:
 		vkDeviceWaitIdle(device);
 
 		cleanupSwapChain();
-		recreateImGuiWindow(width, height);
+
 		createSwapChain();
 		createImageViews();
 		createDepthResources();
@@ -422,12 +419,9 @@ private:
 		vkDestroySwapchainKHR(device, swapChain, nullptr);
 	}
 
-	void cleanupVulkanWindow() {
-		ImGui_ImplVulkanH_DestroyWindow(instance, device, &imGuiMainWindowData, nullptr);
-	}
-
 	void cleanup() {
-		cleanupVulkanWindow();
+		cleanupImGui();
+
 		cleanupSwapChain();
 
 		vkDestroySampler(device, textureSampler, nullptr);
@@ -872,9 +866,6 @@ private:
 		VkPresentModeKHR presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
 		VkExtent2D extent = chooseSwapExtent(swapChainSupport.capabilities);
 
-		//imgui
-		g_MinImageCount = swapChainSupport.capabilities.minImageCount;
-
 		uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
 
 		if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) {
@@ -1265,6 +1256,8 @@ private:
 			throw std::runtime_error("failed to begin recording command buffer!");
 		}
 
+
+
 		VkRenderPassBeginInfo renderPassInfo{};
 		renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 		renderPassInfo.renderPass = renderPass;
@@ -1278,12 +1271,16 @@ private:
 		clearValues[1].depthStencil = { 1.0f,0 };
 		renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
 		renderPassInfo.pClearValues = clearValues.data();
+		
+
+
 
 		vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 		vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
 
 		VkBuffer vertexBuffers[] = { vertexBuffer };
 		VkDeviceSize  offsets[] = { 0 };
+
 		vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
 		vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT32);
@@ -1309,7 +1306,14 @@ private:
 
 		//vkCmdDraw(commandBuffer, static_cast<uint32_t>(vertices.size()), 1, 0, 0);
 
+
+
+
 		vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+		
+		//for imgui
+		ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffers[currentFrame]);
+		
 		vkCmdEndRenderPass(commandBuffer);
 		if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
 			throw std::runtime_error("failed to record command buffer!");
@@ -1319,6 +1323,9 @@ private:
 	}
 
 	void drawFrame() {
+		// for imgui
+		ImGui::Render();
+
 		vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
 
@@ -1337,9 +1344,13 @@ private:
 		vkResetFences(device, 1, &inFlightFences[currentFrame]);
 
 		vkResetCommandBuffer(commandBuffers[currentFrame], 0);
+
+
 		recordCommandBuffer(commandBuffers[currentFrame], imageIndex);
 
 		updateUniformBuffer(currentFrame);
+
+
 
 		VkSubmitInfo submitInfo{};
 		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1356,6 +1367,8 @@ private:
 		VkSemaphore signalSemaphores[] = { renderFinishedSemaphores[currentFrame] };
 		submitInfo.signalSemaphoreCount = 1;
 		submitInfo.pSignalSemaphores = signalSemaphores;
+
+
 
 
 		if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS)
